@@ -1,22 +1,13 @@
-from flask import Flask, request, jsonify
+from flask import Flask
 from flask_cors import CORS
-from llm_utils import generate_test_ideas
+from ai.endpoint import llm_blueprint
 
-app = Flask(__name__)
-CORS(app) #this is to connect fronten
-
-@app.route("/generate-ideas", methods =["POST"])
-def generate_ideas():
-    data = request.get_json()
-    code = data.get("code", "")
-    language = data.get("language", "python")
-    framework = data.get("framework", "pytest")
-
-    if not code:
-        return jsonify({"error": "kod måste skicaks in"}), 400
-
-    test_ideas = generate_test_ideas(code, language, framework)
-    return jsonify({"test_ideas": test_ideas})
+def create_app():
+    app = Flask(__name__)
+    CORS(app)
+    app.register_blueprint(llm_blueprint)
+    return app
 
 if __name__ == "__main__":
+    app = create_app()
     app.run(debug=True)

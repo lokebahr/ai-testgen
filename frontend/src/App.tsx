@@ -1,6 +1,6 @@
 import { Routes, Route, Link } from 'react-router-dom'
 import Home from './pages/Home'
-
+import TestCases from './pages/TestCases'
 
 
 export default function App() {
@@ -13,6 +13,7 @@ export default function App() {
 
       <Routes>
         <Route path="/" element={<Home />} />
+        <Route path="/testcases" element={<TestCases />} />
         
       </Routes>
     </div>
