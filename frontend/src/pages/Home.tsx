@@ -4,6 +4,7 @@ import Layout from "../components/Layout"
 import Header from "../components/Header"
 import CodeInput from "../components/CodeInput"
 import TestPlanModal from "../components/TestPlanModal"
+import Loading from "../components/ui/Loading"
 
 export default function Home() {
     const [code, setCode] = useState("")
@@ -14,9 +15,11 @@ export default function Home() {
     const [filename, setFilename] = useState("")
     const [showFilenameInput, setShowFilenameInput] = useState(false)
     const [pendingPlan, setPendingPlan] = useState<string[]>([])
+    const [loading, setLoading] = useState(false)
     const navigate = useNavigate()
 
     const handleGenerate = async () => {
+        setLoading(true);
         try {
             const response = await fetch("http://localhost:5000/api/testplan", {
                 method: "POST",
@@ -41,6 +44,8 @@ export default function Home() {
             }
         } catch (err) {
             console.error("Network error:", err);
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -52,6 +57,7 @@ export default function Home() {
     const handleFilenameSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setShowFilenameInput(false);
+        setLoading(true);
         try {
             const response = await fetch("http://localhost:5000/api/test_creation", {
                 method: "POST",
@@ -70,6 +76,8 @@ export default function Home() {
             }
         } catch (err) {
             console.error("Network error:", err);
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -91,7 +99,8 @@ export default function Home() {
                 initialTests={testIdeas}
                 onConfirm={handleConfirm}
             />
-            {showFilenameInput && (
+            {loading && <Loading />}
+            {showFilenameInput && !loading && (
                 <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
                     <form onSubmit={handleFilenameSubmit} className="bg-white rounded-lg shadow-lg p-6 w-full max-w-sm flex flex-col gap-4">
                         <label className="font-semibold">Filnamn för kodfilen:</label>

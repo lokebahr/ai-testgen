@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import TestCard from "./TestCard";
+import TestCard from "./TestCard.tsx";
 
 interface TestPlanModalProps {
     open: boolean;
