@@ -2,3 +2,5 @@ flask
 flask-cors
 openai==0.28
 dotenv
+pytest
+markdown

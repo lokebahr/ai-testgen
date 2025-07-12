@@ -6,9 +6,11 @@ type Props = {
     code: string
     language: string
     framework: string
+    filename: string
     onChangeCode: (value:string) => void
     onChangeLanguage: (value:string) => void
     onChangeFramework: (value: string) => void
+    onChangeFilename: (value: string) => void
     onGenerate: () => void
 }
 
@@ -16,14 +18,29 @@ const CodeInput: React.FC<Props> = ({
     code,
     language,
     framework,
+    filename,
     onChangeCode,
     onChangeLanguage,
     onChangeFramework,
+    onChangeFilename,
     onGenerate,
 }) => {
     //spacing
     return (
         <div className="space-y-4">
+            
+        <div>
+            <label className="block text-sm font-medium mb-1">
+                Filnamn
+            </label>
+            <input
+                type="text"
+                className="w-full p-2 border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 rounded-md"
+                placeholder="t.ex. code.py, main.js, Calculator.java"
+                value={filename}
+                onChange={(e) => onChangeFilename(e.target.value)}
+            />
+        </div>
     
         <label className="block text-sm font-medium mb-1">
              Kod
