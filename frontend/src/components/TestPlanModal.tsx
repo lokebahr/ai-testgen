@@ -6,9 +6,10 @@ interface TestPlanModalProps {
     onClose: () => void;
     initialTests: string[];
     onConfirm: (tests: string[]) => void;
+    onRegenerate?: () => void;
 }
 
-export default function TestPlanModal({ open, onClose, initialTests, onConfirm }: TestPlanModalProps) {
+export default function TestPlanModal({ open, onClose, initialTests, onConfirm, onRegenerate }: TestPlanModalProps) {
     const [tests, setTests] = useState<string[]>(initialTests);
 
     useEffect(() => {
@@ -49,7 +50,12 @@ export default function TestPlanModal({ open, onClose, initialTests, onConfirm }
                     ))}
                 </div>
                 <div className="flex justify-between mt-4">
-                    <button className="btn btn-outline" onClick={handleAdd}>Add Test</button>
+                    <div className="flex gap-2">
+                        <button className="btn btn-outline" onClick={handleAdd}>Add Test</button>
+                        {onRegenerate && (
+                            <button className="btn btn-warning" onClick={onRegenerate}>Regenerate Plan</button>
+                        )}
+                    </div>
                     <div>
                         <button className="btn btn-secondary mr-2" onClick={onClose}>Cancel</button>
                         <button className="btn btn-primary" onClick={handleConfirm}>Confirm</button>

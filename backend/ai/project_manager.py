@@ -3,7 +3,7 @@ import uuid
 import tempfile
 import shutil
 from typing import Dict, List, Optional, Union
-from git import Repo
+from git import Repo, RemoteReference
 import json
 
 
@@ -14,7 +14,8 @@ class ProjectManager:
         self.base_temp_dir = tempfile.gettempdir()
     
     def init_project(self, mode: str, file_content: Optional[str] = None, 
-                    git_url: Optional[str] = None, filename: Optional[str] = None) -> Dict:
+                    git_url: Optional[str] = None, filename: Optional[str] = None, 
+                    branch: Optional[str] = None) -> Dict:
         """Initialize a new project workspace"""
         project_id = str(uuid.uuid4())
         
@@ -36,10 +37,12 @@ class ProjectManager:
             if not git_url:
                 raise ValueError("git_url is required for git mode")
             
-            # Clone repository
             project_dir = os.path.join(self.base_temp_dir, f"testgen_project_{project_id}")
             try:
-                Repo.clone_from(git_url, project_dir)
+                if branch:
+                    repo = Repo.clone_from(git_url, project_dir, branch=branch)
+                else:
+                    repo = Repo.clone_from(git_url, project_dir)
             except Exception as e:
                 raise ValueError(f"Failed to clone repository: {str(e)}")
         else:
@@ -51,7 +54,8 @@ class ProjectManager:
             "mode": mode,
             "root_path": project_dir,
             "git_url": git_url if mode == "git" else None,
-            "created_at": None  # You can add timestamp if needed
+            "branch": branch if mode == "git" and branch else None,
+            "created_at": None
         }
         
         return {
@@ -157,6 +161,26 @@ class ProjectManager:
     def list_projects(self) -> List[Dict]:
         """List all active projects"""
         return list(self.projects.values())
+    
+    def get_git_branches(self, git_url: str) -> List[str]:
+        """Get available branches from a git repository"""
+        try:
+            temp_dir = os.path.join(self.base_temp_dir, f"temp_branch_check_{uuid.uuid4()}")
+            
+            try:
+                repo = Repo.clone_from(git_url, temp_dir, bare=True)
+                branches = []
+                for ref in repo.refs:
+                    if isinstance(ref, RemoteReference) and ref.remote_name == 'origin':
+                        branch_name = ref.name.replace('origin/', '')
+                        if branch_name != 'HEAD':
+                            branches.append(branch_name)
+                return sorted(branches)
+            finally:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+        except Exception as e:
+            raise ValueError(f"Failed to fetch branches: {str(e)}")
 
 
 # Global instance

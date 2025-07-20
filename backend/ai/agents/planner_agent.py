@@ -1,5 +1,5 @@
 import os
-import openai
+from openai import OpenAI
 
 PLANNER_PROMPT = (
     "You are an expert in {language} and testing with {framework}.\n"
@@ -12,15 +12,15 @@ PLANNER_PROMPT = (
 class PlannerAgent:
     def __init__(self, api_key=None):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        openai.api_key = self.api_key
+        self.client = OpenAI(api_key=self.api_key)
 
     def plan(self, code, language="python", framework="pytest", model="gpt-4o"):
         prompt = PLANNER_PROMPT.format(language=language, framework=framework, code=code)
-        resp = openai.ChatCompletion.create(
+        resp = self.client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": ""},
                 {"role": "user", "content": prompt},
             ],
         )
-        return resp.choices[0].message["content"]
+        return resp.choices[0].message.content

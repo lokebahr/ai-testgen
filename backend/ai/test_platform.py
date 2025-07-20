@@ -6,6 +6,8 @@ from .agents.executor_agent import ExecutorAgent
 from .agents.reviewer_agent import ReviewerAgent
 import os
 import json
+import threading
+import time
 
 # Create blueprint
 test_platform = Blueprint('test_platform', __name__)
@@ -15,6 +17,23 @@ planner_agent = PlannerAgent()
 generator_agent = GeneratorAgent()
 executor_agent = ExecutorAgent()
 reviewer_agent = ReviewerAgent()
+
+workflow_status = {}
+
+def update_workflow_status(workflow_id, step, status, message="", progress=0):
+    workflow_status[workflow_id] = {
+        "step": step,
+        "status": status,
+        "message": message,
+        "progress": progress,
+        "timestamp": time.time()
+    }
+
+@test_platform.route("/workflow/<workflow_id>/status", methods=["GET"])
+def get_workflow_status(workflow_id):
+    """Get the current status of a workflow"""
+    status = workflow_status.get(workflow_id, {"step": "unknown", "status": "not_found", "message": "Workflow not found", "progress": 0})
+    return jsonify(status)
 
 
 @test_platform.route("/init", methods=["POST"])
@@ -30,7 +49,8 @@ def init_project():
             result = project_manager.init_project(mode, file_content=file_content, filename=filename)
         elif mode == "git":
             git_url = data.get("git_url")
-            result = project_manager.init_project(mode, git_url=git_url)
+            branch = data.get("branch")
+            result = project_manager.init_project(mode, git_url=git_url, branch=branch)
         else:
             return jsonify({"error": "Invalid mode. Use 'single' or 'git'"}), 400
         
@@ -91,7 +111,7 @@ def plan_tests(project_id):
         
         tests = eval(result) if isinstance(result, str) else result
         print(f"[PLAN] Suggested tests: {tests}")
-        return jsonify({"tests": tests, "file_path": file_path})
+        return jsonify({"test_plan": tests, "file_path": file_path})
         
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
@@ -134,6 +154,7 @@ def execute_tests(project_id):
     try:
         data = request.json
         test_code = data.get("test_code")
+        source_file_path = data.get("source_file_path")  # Optional: path to the source file being tested
         
         if not test_code:
             return jsonify({"error": "Missing test_code"}), 400
@@ -145,8 +166,19 @@ def execute_tests(project_id):
         
         workspace_path = project["root_path"]
         
+        # If source_file_path is relative, make it absolute within the workspace
+        absolute_source_path = None
+        if source_file_path:
+            if os.path.isabs(source_file_path):
+                absolute_source_path = source_file_path
+            else:
+                absolute_source_path = os.path.join(workspace_path, source_file_path)
+        
         print(f"[EXECUTE] Running pytest in project workspace: {workspace_path}")
-        result = executor_agent.execute(test_code, workspace_path=workspace_path)
+        if absolute_source_path:
+            print(f"[EXECUTE] Source file: {absolute_source_path}")
+        
+        result = executor_agent.execute(test_code, workspace_path=workspace_path, source_file_path=absolute_source_path)
         
         if isinstance(result, tuple):
             return jsonify(result[0]), result[1]
@@ -202,7 +234,7 @@ def review_tests(project_id):
 
 @test_platform.route("/projects/<project_id>/test", methods=["POST"])
 def orchestrate_tests(project_id):
-    """Orchestrate the full test pipeline: plan → generate → execute → review"""
+    """Orchestrate only the planning step - returns test plan for user confirmation"""
     try:
         data = request.json
         file_path = data.get("file_path")
@@ -218,11 +250,9 @@ def orchestrate_tests(project_id):
             return jsonify({"error": "Project not found"}), 404
         
         code = project_manager.get_file_content(project_id, file_path)
-        filename = os.path.basename(file_path)
-        workspace_path = project["root_path"]
         
-        # 1. Plan
-        print(f"[ORCHESTRATE] Step 1: Planning tests for {file_path}")
+        # 1. Plan only
+        print(f"[ORCHESTRATE] Planning tests for {file_path}")
         try:
             plan_result = planner_agent.plan(code, language=language, framework=framework)
             # Strip markdown code blocks if present
@@ -233,84 +263,133 @@ def orchestrate_tests(project_id):
             if plan_result.endswith("```"):
                 plan_result = plan_result[:-3].strip()
                 
-            tests = eval(plan_result) if isinstance(plan_result, str) else plan_result
+            test_plan = eval(plan_result) if isinstance(plan_result, str) else plan_result
+            
+            return jsonify({
+                "test_plan": test_plan,
+                "file_path": file_path
+            })
+            
         except Exception as e:
             return jsonify({"error": str(e), "step": "planner"}), 500
-        
-        # 2. Generate
-        print(f"[ORCHESTRATE] Step 2: Generating test code")
-        try:
-            test_code = generator_agent.generate(code, tests, filename=filename)
-        except Exception as e:
-            return jsonify({"error": str(e), "step": "generator"}), 500
-        
-        # 3. Execute
-        print(f"[ORCHESTRATE] Step 3: Executing tests in workspace")
-        result = executor_agent.execute(test_code, workspace_path=workspace_path)
-        if isinstance(result, tuple):
-            return jsonify(result[0]), result[1]
-        
-        output = result["output"]
-        passed = result["passed"]
-        
-        # 4. Review
-        print(f"[ORCHESTRATE] Step 4: Reviewing results")
-        if passed:
-            return jsonify({
-                "status": "ALL_TESTS_PASS",
-                "file_path": file_path,
-                "test_plan": tests,
-                "test_code": test_code,
-                "execution_result": result
-            })
-        
-        try:
-            review_result = reviewer_agent.review(output, code=code, test_code=test_code)
-            
-            # The reviewer agent returns a dictionary directly
-            if isinstance(review_result, dict):
-                review_result.update({
-                    "file_path": file_path,
-                    "test_plan": tests,
-                    "test_code": test_code,
-                    "execution_result": result
-                })
-                return jsonify(review_result)
-            else:
-                # Fallback if it somehow returns a string
-                try:
-                    result_dict = json.loads(review_result)
-                    result_dict.update({
-                        "file_path": file_path,
-                        "test_plan": tests,
-                        "test_code": test_code,
-                        "execution_result": result
-                    })
-                    return jsonify(result_dict)
-                except json.JSONDecodeError:
-                    return jsonify({
-                        "status": "FAILED", 
-                        "analysis_markdown": str(review_result), 
-                        "fix_markdown": "No suggestion provided.",
-                        "file_path": file_path,
-                        "test_plan": tests,
-                        "test_code": test_code,
-                        "execution_result": result
-                    })
-        except Exception as e:
-            return jsonify({
-                "error": str(e), 
-                "step": "reviewer",
-                "file_path": file_path,
-                "test_plan": tests,
-                "test_code": test_code,
-                "execution_result": result
-            }), 500
             
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         print(f"[ORCHESTRATE][ERROR] {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@test_platform.route("/projects/<project_id>/run", methods=["POST"])
+def run_tests(project_id):
+    """Run the complete test pipeline: generate → execute → review after plan approval"""
+    try:
+        data = request.json
+        file_path = data.get("file_path")
+        test_plan = data.get("test_plan")
+        workflow_id = data.get("workflow_id", f"{project_id}_{int(time.time())}")
+        
+        if not file_path or not test_plan:
+            return jsonify({"error": "Missing file_path or test_plan"}), 400
+        
+        update_workflow_status(workflow_id, "initializing", "running", "Setting up test environment", 5)
+        
+        project = project_manager.get_project(project_id)
+        if not project:
+            return jsonify({"error": "Project not found"}), 404
+        
+        code = project_manager.get_file_content(project_id, file_path)
+        filename = os.path.basename(file_path)
+        workspace_path = project["root_path"]
+        
+        update_workflow_status(workflow_id, "generating", "running", "AI is generating test code", 25)
+        print(f"[RUN] Step 1: Generating test code")
+        try:
+            test_code = generator_agent.generate(code, test_plan, filename=filename)
+        except Exception as e:
+            update_workflow_status(workflow_id, "generating", "failed", f"Failed to generate tests: {str(e)}", 25)
+            return jsonify({"error": str(e), "step": "generator"}), 500
+        
+        update_workflow_status(workflow_id, "executing", "running", "Running tests in workspace", 50)
+        print(f"[RUN] Step 2: Executing tests in workspace")
+        
+        absolute_source_path = os.path.join(workspace_path, file_path)
+        
+        result = executor_agent.execute(test_code, workspace_path=workspace_path, source_file_path=absolute_source_path)
+        if isinstance(result, tuple):
+            update_workflow_status(workflow_id, "executing", "failed", f"Test execution failed: {result[0].get('error', 'Unknown error')}", 50)
+            return jsonify(result[0]), result[1]
+        
+        output = result["output"]
+        passed = result["passed"]
+        
+        update_workflow_status(workflow_id, "reviewing", "running", "AI is analyzing test results", 75)
+        print(f"[RUN] Step 3: Reviewing results")
+        
+        if passed:
+            update_workflow_status(workflow_id, "completed", "success", "All tests passed!", 100)
+            return jsonify({
+                "status": "ALL_TESTS_PASS",
+                "file_path": file_path,
+                "test_plan": test_plan,
+                "test_code": test_code,
+                "execution_result": result,
+                "workflow_id": workflow_id
+            })
+        
+        try:
+            review_result = reviewer_agent.review(output, code=code, test_code=test_code)
+            
+            update_workflow_status(workflow_id, "completed", "completed", "Analysis complete", 100)
+            
+            if isinstance(review_result, dict):
+                review_result.update({
+                    "file_path": file_path,
+                    "test_plan": test_plan,
+                    "test_code": test_code,
+                    "execution_result": result,
+                    "workflow_id": workflow_id
+                })
+                return jsonify(review_result)
+            else:
+                try:
+                    result_dict = json.loads(review_result)
+                    result_dict.update({
+                        "file_path": file_path,
+                        "test_plan": test_plan,
+                        "test_code": test_code,
+                        "execution_result": result,
+                        "workflow_id": workflow_id
+                    })
+                    return jsonify(result_dict)
+                except json.JSONDecodeError:
+                    return jsonify({
+                        "status": "FAILED", 
+                        "issues": [{"test_name": "unknown", "error_type": "ParseError", "description": "Failed to parse analysis", "expected": "", "actual": "", "cause": "Analysis parsing error"}],
+                        "summary": "Failed to parse test analysis",
+                        "fixed_code": "No suggestion provided.",
+                        "file_path": file_path,
+                        "test_plan": test_plan,
+                        "test_code": test_code,
+                        "execution_result": result,
+                        "workflow_id": workflow_id
+                    })
+        except Exception as e:
+            update_workflow_status(workflow_id, "reviewing", "failed", f"Analysis failed: {str(e)}", 75)
+            return jsonify({
+                "error": str(e), 
+                "step": "reviewer",
+                "file_path": file_path,
+                "test_plan": test_plan,
+                "test_code": test_code,
+                "execution_result": result,
+                "workflow_id": workflow_id
+            }), 500
+            
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"[RUN][ERROR] {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -330,5 +409,21 @@ def cleanup_project(project_id):
     try:
         project_manager.cleanup_project(project_id)
         return jsonify({"message": f"Project {project_id} cleaned up successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@test_platform.route("/git/branches", methods=["POST"])
+def get_git_branches():
+    """Get available branches from a git repository"""
+    try:
+        data = request.json
+        git_url = data.get("git_url")
+        
+        if not git_url:
+            return jsonify({"error": "git_url is required"}), 400
+        
+        branches = project_manager.get_git_branches(git_url)
+        return jsonify({"branches": branches})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

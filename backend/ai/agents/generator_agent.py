@@ -1,5 +1,5 @@
 import os
-import openai
+from openai import OpenAI
 
 GENERATOR_PROMPT = (
     "Given the following code in {filename}:\n\n{code}\n\n"
@@ -27,16 +27,16 @@ def strip_code_blocks(text):
 class GeneratorAgent:
     def __init__(self, api_key=None):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        openai.api_key = self.api_key
+        self.client = OpenAI(api_key=self.api_key)
 
     def generate(self, code, tests, filename="code.py", model="gpt-4o"):
         prompt = GENERATOR_PROMPT.format(filename=filename, code=code, test_plan=tests)
-        resp = openai.ChatCompletion.create(
+        resp = self.client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": ""},
                 {"role": "user", "content": prompt},
             ],
         )
-        test_code = resp.choices[0].message["content"]
+        test_code = resp.choices[0].message.content
         return strip_code_blocks(test_code)

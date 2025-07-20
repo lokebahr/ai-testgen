@@ -1,5 +1,10 @@
 from flask import Flask
 from flask_cors import CORS
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 from ai.test_platform import test_platform
 
 def create_app():

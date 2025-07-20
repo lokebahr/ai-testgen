@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Layout from '../components/Layout'
 import Header from '../components/Header'
@@ -9,6 +9,9 @@ export default function ProjectInit() {
   const [fileContent, setFileContent] = useState('')
   const [filename, setFilename] = useState('main.py')
   const [gitUrl, setGitUrl] = useState('')
+  const [branch, setBranch] = useState('')
+  const [availableBranches, setAvailableBranches] = useState<string[]>([])
+  const [loadingBranches, setLoadingBranches] = useState(false)
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
 
@@ -17,7 +20,7 @@ export default function ProjectInit() {
     try {
       const payload = mode === 'single' 
         ? { mode, file: fileContent, filename }
-        : { mode, git_url: gitUrl }
+        : { mode, git_url: gitUrl, ...(branch && { branch }) }
 
       const response = await fetch('http://localhost:5000/api/init', {
         method: 'POST',
@@ -40,6 +43,42 @@ export default function ProjectInit() {
       setLoading(false)
     }
   }
+
+  const fetchBranches = async (url: string) => {
+    if (!url) return
+    
+    setLoadingBranches(true)
+    try {
+      const response = await fetch('http://localhost:5000/api/git/branches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ git_url: url })
+      })
+      
+      const data = await response.json()
+      if (response.ok) {
+        setAvailableBranches(data.branches)
+      } else {
+        setAvailableBranches([])
+      }
+    } catch (err) {
+      setAvailableBranches([])
+    } finally {
+      setLoadingBranches(false)
+    }
+  }
+
+  useEffect(() => {
+    if (mode === 'git' && gitUrl) {
+      const timer = setTimeout(() => {
+        fetchBranches(gitUrl)
+      }, 500) // Debounce API call by 500ms
+
+      return () => clearTimeout(timer)
+    } else {
+      setAvailableBranches([])
+    }
+  }, [gitUrl, mode])
 
   return (
     <Layout padding="lg" width="lg">
@@ -95,25 +134,81 @@ export default function ProjectInit() {
             </div>
           </div>
         ) : (
-          <div>
-            <label className="block text-sm font-medium mb-2">Git Repository URL</label>
-            <input
-              type="url"
-              value={gitUrl}
-              onChange={(e) => setGitUrl(e.target.value)}
-              className="w-full p-2 border border-gray-300 rounded"
-              placeholder="https://github.com/username/repository.git"
-            />
-            <p className="text-sm text-gray-600 mt-1">
-              Enter a public Git repository URL to clone and analyze
-            </p>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">Git Repository URL</label>
+              <input
+                type="url"
+                value={gitUrl}
+                onChange={(e) => {
+                  setGitUrl(e.target.value)
+                  setBranch('')
+                  setAvailableBranches([])
+                }}
+                onBlur={() => fetchBranches(gitUrl)}
+                className="w-full p-2 border border-gray-300 rounded"
+                placeholder="https://github.com/username/repository.git"
+              />
+              <p className="text-sm text-gray-600 mt-1">
+                Enter a public Git repository URL to clone and analyze
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Branch {loadingBranches && '(loading...)'}
+              </label>
+              {availableBranches.length > 0 ? (
+                <select
+                  value={branch}
+                  onChange={(e) => setBranch(e.target.value)}
+                  className="w-full p-2 border border-gray-300 rounded"
+                >
+                  <option value="">Select a branch (optional)</option>
+                  {availableBranches.map((branchName) => (
+                    <option key={branchName} value={branchName}>
+                      {branchName}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={branch}
+                  onChange={(e) => setBranch(e.target.value)}
+                  className="w-full p-2 border border-gray-300 rounded"
+                  placeholder="main, develop, feature/branch-name"
+                  disabled={loadingBranches}
+                />
+              )}
+              <p className="text-sm text-gray-600 mt-1">
+                Leave empty to use the default branch
+              </p>
+            </div>
+            {loadingBranches && <Loading />}
+            {!loadingBranches && availableBranches.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium mb-2">Available Branches</label>
+                <select
+                  value={branch}
+                  onChange={(e) => setBranch(e.target.value)}
+                  className="w-full p-2 border border-gray-300 rounded"
+                >
+                  <option value="">Select a branch</option>
+                  {availableBranches.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
         )}
 
         <button
           onClick={handleInit}
           disabled={loading || (mode === 'single' && !fileContent) || (mode === 'git' && !gitUrl)}
-          className="w-full bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 disabled:bg-gray-400"
+          className="w-full bg-yellow-500 text-black py-2 px-4 rounded hover:bg-yellow-600 disabled:bg-gray-400"
         >
           {loading ? 'Initializing...' : 'Initialize Project'}
         </button>
