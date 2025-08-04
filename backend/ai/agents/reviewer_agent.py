@@ -2,42 +2,43 @@ import os
 from openai import OpenAI
 
 REVIEWER_PROMPT = """
-You are a test reviewer agent. You receive pytest output and analyze test failures.
+You are an code reviewer and debugger. You receive pytest output and analyze test failures to provide practical fixes.
 
 CRITICAL: You must respond with ONLY valid JSON, no additional text before or after.
 
 If all tests passed, return exactly:
 {"status": "ALL_TESTS_PASS"}
 
-If tests failed, return exactly this JSON structure:
+If tests failed, analyze the root cause and provide a working fix. Return exactly this JSON structure:
 {
   "status": "FAILED",
   "issues": [
     {
       "test_name": "name_of_failing_test",
       "error_type": "AssertionError|TypeError|ValueError|etc",
-      "description": "Brief explanation of what went wrong",
+      "description": "Clear explanation of what went wrong",
       "expected": "what was expected",
       "actual": "what actually happened", 
-      "cause": "root cause in the code"
+      "cause": "root cause in the original code"
     }
   ],
-  "summary": "One sentence summary of main problems",
-  "fixed_code": "Complete corrected function code"
+  "summary": "Concise summary of the main problems",
+  "fixed_code": "Complete corrected function code that will make the tests pass"
 }
 
-Requirements:
-- Return ONLY the JSON object, no markdown, no explanations
-- Include all function imports, type hints, and docstrings in fixed_code
-- Be specific about expected vs actual values
-- Identify the root cause in the original code
+Requirements for fixed_code:
+- Must be complete, runnable code with all imports and function signatures
+- Should fix the actual logic errors, not just make tests pass superficially
+- Include proper type hints and docstrings from original code
+- Focus on the most likely and practical fixes
+- Ensure the fix addresses the root cause, not just symptoms
 
-Example for moving average off-by-one error:
+Example for a function that returns too few elements:
 {
   "status": "FAILED", 
-  "issues": [{"test_name": "test_function", "error_type": "AssertionError", "description": "Missing last window", "expected": "[2.0, 3.0, 4.0]", "actual": "[2.0, 3.0]", "cause": "Loop range should be len(nums) - window + 1"}],
-  "summary": "Off-by-one error in loop range",
-  "fixed_code": "def function(): return fixed_code"
+  "issues": [{"test_name": "test_function", "error_type": "AssertionError", "description": "Function returns fewer elements than expected", "expected": "3 elements", "actual": "2 elements", "cause": "Off-by-one error in loop range"}],
+  "summary": "Function has off-by-one error in loop calculation",
+  "fixed_code": "def function(data, window): # Complete working function here"
 }
 """
 
@@ -61,7 +62,7 @@ class ReviewerAgent:
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.client = OpenAI(api_key=self.api_key)
 
-    def review(self, output, code=None, test_code=None, conversation=None, model="gpt-4o"):
+    def review(self, output, code=None, test_code=None, conversation=None, model="gpt-4o-2024-08-06"):
         user_prompt = f"""
 Pytest output (failed):
 {output}
@@ -88,10 +89,10 @@ Conversation history:
         try:
             import json
             
-            # Try to clean up the response first
+            
             cleaned_result = review_result.strip()
             
-            # Remove markdown code blocks if present
+           
             if cleaned_result.startswith("```json"):
                 cleaned_result = cleaned_result[7:].strip()
             elif cleaned_result.startswith("```"):
@@ -108,56 +109,7 @@ Conversation history:
             print(f"[REVIEWER] JSON Parse error: {e}")
             print(f"[REVIEWER] Raw content was: {review_result}")
             
-            # Manual parsing as fallback for this specific case
-            if "moving_average" in str(output) and "assert [2.0, 3.0] == [2.0, 3.0, 4.0]" in str(output):
-                return {
-                    "status": "FAILED",
-                    "issues": [
-                        {
-                            "test_name": "test_valid_input_with_normal_data",
-                            "error_type": "AssertionError",
-                            "description": "Function returns fewer elements than expected",
-                            "expected": "[2.0, 3.0, 4.0]",
-                            "actual": "[2.0, 3.0]",
-                            "cause": "Off-by-one error in loop range - missing the last valid window"
-                        }
-                    ],
-                    "summary": "The moving average function has an off-by-one error in the loop range calculation",
-                    "fixed_code": """from typing import List
-
-def moving_average(nums: List[float], window: int) -> List[float]:
-    \"\"\"
-    Compute the moving average over a sliding window.
-
-    Args:
-        nums: a list of numbers (ints or floats)
-        window: size of the sliding window; must be a positive integer
-
-    Returns:
-        A list of averages, one for each window position.
-
-    Raises:
-        TypeError: if nums is not a list or window is not an int
-        ValueError: if window is not positive
-    \"\"\"
-    if not isinstance(nums, list):
-        raise TypeError("nums must be a list of numbers")
-    if not isinstance(window, int):
-        raise TypeError("window must be an integer")
-    if window <= 0:
-        raise ValueError("window must be positive")
-    if window > len(nums):
-        raise ValueError("window must not exceed length of nums")
-
-    averages: List[float] = []
-    for i in range(len(nums) - window + 1):
-        window_sum = sum(nums[i : i + window])
-        averages.append(window_sum / window)
-
-    return averages"""
-                }
-            
-            # Generic fallback
+            # Generic fallback when JSON parsing fails
             return {
                 "status": "FAILED",
                 "issues": [{"test_name": "unknown", "error_type": "ParseError", "description": "Failed to parse test results", "expected": "", "actual": "", "cause": "Unable to analyze output"}],

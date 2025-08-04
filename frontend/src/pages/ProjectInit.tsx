@@ -6,6 +6,7 @@ import Loading from '../components/ui/Loading'
 
 export default function ProjectInit() {
   const [mode, setMode] = useState<'single' | 'git'>('single')
+  const [title, setTitle] = useState('')
   const [fileContent, setFileContent] = useState('')
   const [filename, setFilename] = useState('main.py')
   const [gitUrl, setGitUrl] = useState('')
@@ -19,8 +20,8 @@ export default function ProjectInit() {
     setLoading(true)
     try {
       const payload = mode === 'single' 
-        ? { mode, file: fileContent, filename }
-        : { mode, git_url: gitUrl, ...(branch && { branch }) }
+        ? { mode, title: title || `Single File: ${filename}`, file: fileContent, filename }
+        : { mode, title: title || `Git: ${gitUrl.split('/').pop() || 'Repository'}`, git_url: gitUrl, ...(branch && { branch }) }
 
       const response = await fetch('http://localhost:5000/api/init', {
         method: 'POST',
@@ -109,6 +110,17 @@ export default function ProjectInit() {
               Git Repository
             </label>
           </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium mb-2">Project Title</label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={mode === 'single' ? `Single File: ${filename}` : 'Enter project title...'}
+            className="w-full p-2 border border-gray-300 rounded"
+          />
         </div>
 
         {mode === 'single' ? (

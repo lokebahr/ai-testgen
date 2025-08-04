@@ -4,19 +4,33 @@ import Layout from '../components/Layout'
 import Header from '../components/Header'
 import Loading from '../components/ui/Loading'
 import TestPlanModal from '../components/TestPlanModal'
+import BranchSelector from '../components/BranchSelector'
 
 interface FileTreeNode {
   name: string
   path: string
   type: 'file' | 'dir'
+  test_status?: string
+  status_color?: string
   children?: FileTreeNode[]
+}
+
+interface ProjectData {
+  id: string
+  title: string
+  git_repo?: string | null
+  branch?: string | null
+  mode: string
 }
 
 interface ProjectState {
   projectId: string
+  projectData: ProjectData | null
   fileTree: FileTreeNode[]
   selectedFile: string | null
   fileContent: string
+  selectedFileStatus: string | null
+  selectedFileStatusColor: string | null
   testPlan: string[] | null
   testResult: any
   loading: boolean
@@ -78,7 +92,17 @@ const FileTreeComponent = ({
           ) : (
             <>
               <span className="mr-1">📄</span>
-              <span>{node.name}</span>
+              <span className="flex-1">{node.name}</span>
+              {node.test_status && (
+                <span className={`text-xs px-2 py-1 rounded-full ml-2 ${
+                  node.test_status === 'completed' ? 'bg-green-100 text-green-800' :
+                  node.test_status === 'failed' ? 'bg-red-100 text-red-800' :
+                  'bg-yellow-100 text-yellow-800'
+                }`}>
+                  {node.test_status === 'completed' ? '✓' : 
+                   node.test_status === 'failed' ? '✗' : '○'}
+                </span>
+              )}
             </>
           )}
         </div>
@@ -106,9 +130,12 @@ export default function ProjectWorkspace() {
   const navigate = useNavigate()
   const [state, setState] = useState<ProjectState>({
     projectId: projectId!,
+    projectData: null,
     fileTree: [],
     selectedFile: null,
     fileContent: '',
+    selectedFileStatus: null,
+    selectedFileStatusColor: null,
     testPlan: null,
     testResult: null,
     loading: true,
@@ -119,17 +146,43 @@ export default function ProjectWorkspace() {
   })
 
   useEffect(() => {
+    loadProjectData()
     loadFileTree()
   }, [projectId])
+
+  const loadProjectData = async () => {
+    try {
+      const response = await fetch(`http://localhost:5000/api/db/projects/${projectId}`)
+      const data = await response.json()
+      
+      if (response.ok) {
+        setState(prev => ({ ...prev, projectData: data }))
+      } else {
+        console.error('Error loading project data:', data.error)
+      }
+    } catch (err) {
+      console.error('Error loading project data:', err)
+    }
+  }
 
   const loadFileTree = async () => {
     try {
       setState(prev => ({ ...prev, loading: true }))
-      const response = await fetch(`http://localhost:5000/api/projects/${projectId}/files`)
+      const response = await fetch(`http://localhost:5000/api/db/projects/${projectId}/files`)
       const data = await response.json()
       
       if (response.ok) {
-        setState(prev => ({ ...prev, fileTree: data, loading: false }))
+        // Transform database file structure to tree structure
+        const fileTree = data.map((file: any) => ({
+          name: file.title,
+          path: file.path,
+          type: 'file' as const,
+          test_status: file.test_status,
+          status_color: file.test_status === 'completed' ? 'bg-green-100 text-green-800' :
+                       file.test_status === 'failed' ? 'bg-red-100 text-red-800' :
+                       'bg-yellow-100 text-yellow-800'
+        }))
+        setState(prev => ({ ...prev, fileTree, loading: false }))
       } else {
         alert(`Error loading files: ${data.error}`)
         setState(prev => ({ ...prev, loading: false }))
@@ -143,13 +196,39 @@ export default function ProjectWorkspace() {
   const loadFileContent = async (filePath: string) => {
     try {
       setState(prev => ({ ...prev, loading: true, selectedFile: filePath }))
-      const response = await fetch(`http://localhost:5000/api/projects/${projectId}/files/${filePath}`)
-      const data = await response.json()
+      // Find the file ID from the file tree
+      const fileData = state.fileTree.find(f => f.path === filePath)
+      if (!fileData) {
+        alert('File not found')
+        setState(prev => ({ ...prev, loading: false }))
+        return
+      }
+      
+      // Since we're using database storage, we need to get file by path
+      // First get all files to find the ID, or modify API to accept path
+      const response = await fetch(`http://localhost:5000/api/db/projects/${projectId}/files`)
+      const files = await response.json()
       
       if (response.ok) {
-        setState(prev => ({ ...prev, fileContent: data.content, loading: false }))
+        const file = files.find((f: any) => f.path === filePath)
+        if (file) {
+          setState(prev => ({ 
+            ...prev, 
+            fileContent: file.file_content || '', 
+            selectedFileStatus: file.test_status,
+            selectedFileStatusColor: file.test_status === 'completed' ? 'bg-green-100 text-green-800' :
+                                   file.test_status === 'failed' ? 'bg-red-100 text-red-800' :
+                                   'bg-yellow-100 text-yellow-800',
+            loading: false 
+          }))
+        } else {
+          const errorData = await response.json()
+          alert(`Error loading file: ${errorData.error}`)
+          setState(prev => ({ ...prev, loading: false }))
+        }
       } else {
-        alert(`Error loading file: ${data.error}`)
+        const errorData = await response.json()
+        alert(`Error loading files: ${errorData.error}`)
         setState(prev => ({ ...prev, loading: false }))
       }
     } catch (err) {
@@ -241,6 +320,12 @@ export default function ProjectWorkspace() {
         currentStep: 'idle',
         workflowStatus: null
       }))
+      
+      // Reload file tree and file content to update test status
+      loadFileTree()
+      if (state.selectedFile) {
+        loadFileContent(state.selectedFile)
+      }
       
     } catch (err) {
       console.error('Error running tests:', err)
@@ -366,6 +451,21 @@ export default function ProjectWorkspace() {
     )
   }
 
+  const handleBranchChange = (newBranch: string) => {
+    setState(prev => ({ 
+      ...prev, 
+      projectData: prev.projectData ? { ...prev.projectData, branch: newBranch } : null 
+    }))
+    // Reload file tree after branch change
+    loadFileTree()
+  }
+
+  const handleSync = () => {
+    // Reload both project data and file tree after sync
+    loadProjectData()
+    loadFileTree()
+  }
+
   const renderWorkflowProgress = () => {
     if (!state.workflowStatus || !state.loading) return null
 
@@ -402,7 +502,18 @@ export default function ProjectWorkspace() {
   return (
     <Layout padding="lg" width="full">
       <div className="flex justify-between items-center mb-6">
-        <Header title={`Project: ${projectId?.substring(0, 8) || 'Unknown'}...`} size="h1" />
+        <div className="flex items-center gap-4">
+          <Header title={`Project: ${state.projectData?.title || projectId?.substring(0, 8) || 'Unknown'}...`} size="h1" />
+          {state.projectData?.mode === 'git' && (
+            <BranchSelector
+              projectId={projectId!}
+              currentBranch={state.projectData?.branch || null}
+              onBranchChange={handleBranchChange}
+              onSync={handleSync}
+              disabled={state.loading}
+            />
+          )}
+        </div>
         <button
           onClick={() => navigate('/')}
           className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
@@ -428,7 +539,19 @@ export default function ProjectWorkspace() {
           {state.selectedFile && (
             <div className="border rounded p-4 bg-white">
               <div className="flex justify-between items-center mb-2">
-                <h3 className="font-medium">File: {state.selectedFile}</h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-medium">File: {state.selectedFile}</h3>
+                  {state.selectedFileStatus && (
+                    <span className={`text-xs px-2 py-1 rounded-full ${
+                      state.selectedFileStatus === 'completed' ? 'bg-green-100 text-green-800' :
+                      state.selectedFileStatus === 'failed' ? 'bg-red-100 text-red-800' :
+                      'bg-yellow-100 text-yellow-800'
+                    }`}>
+                      {state.selectedFileStatus === 'completed' ? '✓ Tested' : 
+                       state.selectedFileStatus === 'failed' ? '✗ Failed' : '○ Untested'}
+                    </span>
+                  )}
+                </div>
                 <button
                   onClick={planTests}
                   disabled={state.loading}

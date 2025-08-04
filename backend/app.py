@@ -2,14 +2,21 @@ from flask import Flask
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 from ai.test_platform import test_platform
+from db import init_db
+from db.routes import db_routes
 
 def create_app():
     app = Flask(__name__)
     CORS(app)
+    
+    # Initialize database
+    init_db(app)
+    
+    # Register the database routes
+    app.register_blueprint(db_routes, url_prefix='/api/db')
     
     # Register the new test platform blueprint
     app.register_blueprint(test_platform, url_prefix='/api')
@@ -29,4 +36,10 @@ def create_app():
 
 if __name__ == "__main__":
     app = create_app()
+    
+    # Create tables
+    with app.app_context():
+        from db import db
+        db.create_all()
+    
     app.run(debug=True, host='0.0.0.0', port=5000)

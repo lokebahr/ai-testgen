@@ -2,9 +2,37 @@ import os
 import uuid
 import tempfile
 import shutil
+import stat
+import time
 from typing import Dict, List, Optional, Union
 from git import Repo, RemoteReference
 import json
+
+
+def remove_readonly(func, path, _):
+    """Error handler for Windows readonly files during shutil.rmtree"""
+    if os.path.exists(path):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+def safe_rmtree(path):
+    """Safely remove directory tree on Windows"""
+    if os.path.exists(path):
+        try:
+            shutil.rmtree(path, onerror=remove_readonly)
+        except Exception as e:
+            print(f"Warning: Could not fully remove temp directory {path}: {e}")
+            # Try to remove read-only attributes and try again
+            try:
+                for root, dirs, files in os.walk(path):
+                    for d in dirs:
+                        os.chmod(os.path.join(root, d), stat.S_IWRITE)
+                    for f in files:
+                        os.chmod(os.path.join(root, f), stat.S_IWRITE)
+                shutil.rmtree(path)
+            except Exception:
+                # If still fails, leave it for the OS to clean up later
+                pass
 
 
 class ProjectManager:
@@ -154,7 +182,7 @@ class ProjectManager:
         """Clean up project workspace"""
         project = self.get_project(project_id)
         if project and os.path.exists(project["root_path"]):
-            shutil.rmtree(project["root_path"])
+            safe_rmtree(project["root_path"])
         if project_id in self.projects:
             del self.projects[project_id]
     
@@ -168,6 +196,7 @@ class ProjectManager:
             temp_dir = os.path.join(self.base_temp_dir, f"temp_branch_check_{uuid.uuid4()}")
             
             try:
+                # Use bare clone to avoid checking out files
                 repo = Repo.clone_from(git_url, temp_dir, bare=True)
                 branches = []
                 for ref in repo.refs:
@@ -175,10 +204,14 @@ class ProjectManager:
                         branch_name = ref.name.replace('origin/', '')
                         if branch_name != 'HEAD':
                             branches.append(branch_name)
+                
+                # Close the repo object to release file handles
+                repo.close()
                 return sorted(branches)
             finally:
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
+                # Give a moment for file handles to be released
+                time.sleep(0.1)
+                safe_rmtree(temp_dir)
         except Exception as e:
             raise ValueError(f"Failed to fetch branches: {str(e)}")
 

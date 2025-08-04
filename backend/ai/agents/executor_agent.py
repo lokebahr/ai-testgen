@@ -3,12 +3,37 @@ import subprocess
 import os
 import sys
 import shutil
+import ast
+import traceback
 
 class ExecutorAgent:
+    def _check_syntax(self, code):
+        try:
+            ast.parse(code)
+            return True, None
+        except SyntaxError as e:
+            return False, f"SyntaxError: {str(e)}"
+        except Exception as e:
+            return False, f"Parse error: {str(e)}"
+    
+    def _check_compilation(self, code):
+        try:
+            compile(code, '<string>', 'exec')
+            return True, None
+        except Exception as e:
+            return False, f"Compilation error: {str(e)}"
+    
     def execute(self, test_code, workspace_path=None, source_file_path=None):
-       
         if not test_code:
             return {"error": "Missing test_code"}, 400
+        
+        syntax_ok, syntax_error = self._check_syntax(test_code)
+        if not syntax_ok:
+            return {"compilation_error": True, "error": syntax_error}, 400
+        
+        compile_ok, compile_error = self._check_compilation(test_code)
+        if not compile_ok:
+            return {"compilation_error": True, "error": compile_error}, 400
         
         def setup_workspace_for_imports(workspace_root, source_path):
     

@@ -1,13 +1,16 @@
 from flask import Blueprint, request, jsonify
-from .project_manager import project_manager
+from .project_manager import project_manager, safe_rmtree
 from .agents.planner_agent import PlannerAgent
 from .agents.generator_agent import GeneratorAgent
 from .agents.executor_agent import ExecutorAgent
 from .agents.reviewer_agent import ReviewerAgent
+from db import db
+from db.models import Project, File, TestStatus
 import os
 import json
 import threading
 import time
+import tempfile
 
 # Create blueprint
 test_platform = Blueprint('test_platform', __name__)
@@ -29,6 +32,21 @@ def update_workflow_status(workflow_id, step, status, message="", progress=0):
         "timestamp": time.time()
     }
 
+def update_file_test_status(project_id, file_path, status):
+    """Update file test status in database"""
+    try:
+        # Find the file in the database
+        file = File.query.filter_by(project_id=project_id, path=file_path).first()
+        if file:
+            file.test_status = status
+            db.session.commit()
+            print(f"[DB] Updated file {file_path} status to {status.value}")
+        else:
+            print(f"[DB] File {file_path} not found in project {project_id}")
+    except Exception as e:
+        print(f"[DB] Error updating file status: {e}")
+        db.session.rollback()
+
 @test_platform.route("/workflow/<workflow_id>/status", methods=["GET"])
 def get_workflow_status(workflow_id):
     """Get the current status of a workflow"""
@@ -38,32 +56,153 @@ def get_workflow_status(workflow_id):
 
 @test_platform.route("/init", methods=["POST"])
 def init_project():
-    """Initialize a new project workspace"""
+    """Initialize a new project workspace and store in database"""
     try:
         data = request.json
         mode = data.get("mode")  # "single" or "git"
         
+        # Create database project entry
+        from db.models import Project, File, TestStatus
+        from db import db
+        
         if mode == "single":
             file_content = data.get("file")
             filename = data.get("filename", "main.py")
+            title = data.get("title", f"Single File: {filename}")
+            
+            # Create project in database
+            project = Project(
+                title=title,
+                mode=mode,
+                git_repo=None,
+                branch=None
+            )
+            db.session.add(project)
+            db.session.flush()  # Get project ID
+            
+            # Create file in database
+            file = File(
+                project_id=project.id,
+                path=filename,
+                title=filename,
+                file_content=file_content,
+                test_status=TestStatus.UNTESTED
+            )
+            db.session.add(file)
+            
+            # Initialize with project manager for workspace
             result = project_manager.init_project(mode, file_content=file_content, filename=filename)
+            # Map the project manager ID to our database ID
+            project_manager.projects[result["project_id"]]["db_project_id"] = project.id
+            
         elif mode == "git":
             git_url = data.get("git_url")
             branch = data.get("branch")
+            title = data.get("title", f"Git: {git_url.split('/')[-1] if git_url else 'Unknown'}")
+            
+            # Create project in database
+            project = Project(
+                title=title,
+                mode=mode,
+                git_repo=git_url,
+                branch=branch
+            )
+            db.session.add(project)
+            db.session.flush()  # Get project ID
+            
+            # Initialize with project manager for workspace
             result = project_manager.init_project(mode, git_url=git_url, branch=branch)
+            # Map the project manager ID to our database ID
+            project_manager.projects[result["project_id"]]["db_project_id"] = project.id
+            
+            # Scan and add files to database
+            import tempfile
+            import shutil
+            from git import Repo
+            
+            temp_dir = None
+            try:
+                temp_dir = os.path.join(tempfile.gettempdir(), f"scan_{project.id}")
+                
+                # Use shallow clone to reduce file operations
+                if branch:
+                    repo = Repo.clone_from(git_url, temp_dir, branch=branch, depth=1)
+                else:
+                    repo = Repo.clone_from(git_url, temp_dir, depth=1)
+                
+                # Close the repo object to release file handles
+                repo.close()
+                
+                # Scan for source files
+                for root, dirs, files in os.walk(temp_dir):
+                    # Skip .git and other hidden directories
+                    dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules']]
+                    
+                    for filename in files:
+                        if filename.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c')):
+                            file_path = os.path.join(root, filename)
+                            relative_path = os.path.relpath(file_path, temp_dir).replace('\\', '/')
+                            
+                            try:
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                
+                                file = File(
+                                    project_id=project.id,
+                                    path=relative_path,
+                                    title=filename,
+                                    file_content=content,
+                                    test_status=TestStatus.UNTESTED
+                                )
+                                db.session.add(file)
+                            except (UnicodeDecodeError, IOError):
+                                # Skip binary or unreadable files
+                                continue
+                                
+            except Exception as e:
+                db.session.rollback()
+                return jsonify({"error": f"Failed to clone repository: {str(e)}"}), 400
+            finally:
+                if temp_dir and os.path.exists(temp_dir):
+                    # Give a moment for file handles to be released
+                    time.sleep(0.1)
+                    safe_rmtree(temp_dir)
         else:
             return jsonify({"error": "Invalid mode. Use 'single' or 'git'"}), 400
         
-        return jsonify(result)
+        db.session.commit()
+        
+        return jsonify({
+            "project_id": project.id,  # Return database project ID
+            "root_path": result["root_path"]
+        })
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 
 @test_platform.route("/projects/<project_id>/files", methods=["GET"])
 def get_project_files(project_id):
-    """Get file tree for a project"""
+    """Get file tree for a project with test status information"""
     try:
-        file_tree = project_manager.get_file_tree(project_id)
+        # Get files from database with test status
+        files = File.query.filter_by(project_id=project_id).all()
+        
+        if not files:
+            return jsonify({"error": "Project not found or has no files"}), 404
+        
+        # Build file tree structure with test status
+        file_tree = []
+        for file in files:
+            file_node = {
+                "name": file.title,
+                "path": file.path,
+                "type": "file",
+                "test_status": file.test_status.value,
+                "status_color": file.get_status_color()
+            }
+            file_tree.append(file_node)
+        
         return jsonify(file_tree)
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
@@ -73,10 +212,28 @@ def get_project_files(project_id):
 
 @test_platform.route("/projects/<project_id>/files/<path:file_path>", methods=["GET"])
 def get_file_content(project_id, file_path):
-    """Get content of a specific file"""
+    """Get content of a specific file with test status"""
     try:
-        content = project_manager.get_file_content(project_id, file_path)
-        return jsonify({"content": content, "path": file_path})
+        # Get file from database with test status
+        file = File.query.filter_by(project_id=project_id, path=file_path).first()
+        
+        if not file:
+            # Fallback to project manager if not in database
+            content = project_manager.get_file_content(project_id, file_path)
+            return jsonify({
+                "content": content, 
+                "path": file_path,
+                "test_status": "untested",
+                "status_color": "text-yellow-600 bg-yellow-50"
+            })
+        
+        return jsonify({
+            "content": file.file_content, 
+            "path": file.path,
+            "test_status": file.test_status.value,
+            "status_color": file.get_status_color(),
+            "title": file.title
+        })
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
@@ -244,12 +401,12 @@ def orchestrate_tests(project_id):
         if not file_path:
             return jsonify({"error": "Missing file_path"}), 400
         
-        # Get project and file content
-        project = project_manager.get_project(project_id)
-        if not project:
-            return jsonify({"error": "Project not found"}), 404
+        # Get file content from database
+        file = File.query.filter_by(project_id=project_id, path=file_path).first()
+        if not file:
+            return jsonify({"error": "File not found"}), 404
         
-        code = project_manager.get_file_content(project_id, file_path)
+        code = file.file_content
         
         # 1. Plan only
         print(f"[ORCHESTRATE] Planning tests for {file_path}")
@@ -294,98 +451,140 @@ def run_tests(project_id):
         
         update_workflow_status(workflow_id, "initializing", "running", "Setting up test environment", 5)
         
-        project = project_manager.get_project(project_id)
-        if not project:
+        # Get file content from database
+        file = File.query.filter_by(project_id=project_id, path=file_path).first()
+        if not file:
+            return jsonify({"error": "File not found"}), 404
+        
+        # Get project from database
+        db_project = Project.query.get(project_id)
+        if not db_project:
             return jsonify({"error": "Project not found"}), 404
         
-        code = project_manager.get_file_content(project_id, file_path)
+        code = file.file_content
         filename = os.path.basename(file_path)
-        workspace_path = project["root_path"]
         
-        update_workflow_status(workflow_id, "generating", "running", "AI is generating test code", 25)
-        print(f"[RUN] Step 1: Generating test code")
+        # Create or get workspace for test execution
+        temp_workspace = None
         try:
-            test_code = generator_agent.generate(code, test_plan, filename=filename)
-        except Exception as e:
-            update_workflow_status(workflow_id, "generating", "failed", f"Failed to generate tests: {str(e)}", 25)
-            return jsonify({"error": str(e), "step": "generator"}), 500
-        
-        update_workflow_status(workflow_id, "executing", "running", "Running tests in workspace", 50)
-        print(f"[RUN] Step 2: Executing tests in workspace")
-        
-        absolute_source_path = os.path.join(workspace_path, file_path)
-        
-        result = executor_agent.execute(test_code, workspace_path=workspace_path, source_file_path=absolute_source_path)
-        if isinstance(result, tuple):
-            update_workflow_status(workflow_id, "executing", "failed", f"Test execution failed: {result[0].get('error', 'Unknown error')}", 50)
-            return jsonify(result[0]), result[1]
-        
-        output = result["output"]
-        passed = result["passed"]
-        
-        update_workflow_status(workflow_id, "reviewing", "running", "AI is analyzing test results", 75)
-        print(f"[RUN] Step 3: Reviewing results")
-        
-        if passed:
-            update_workflow_status(workflow_id, "completed", "success", "All tests passed!", 100)
-            return jsonify({
-                "status": "ALL_TESTS_PASS",
-                "file_path": file_path,
-                "test_plan": test_plan,
-                "test_code": test_code,
-                "execution_result": result,
-                "workflow_id": workflow_id
-            })
-        
-        try:
-            review_result = reviewer_agent.review(output, code=code, test_code=test_code)
+            if db_project.mode == 'git':
+                # Create temporary workspace for git projects
+                temp_workspace = os.path.join(tempfile.gettempdir(), f"test_workspace_{project_id}_{int(time.time())}")
+                os.makedirs(temp_workspace, exist_ok=True)
+                
+                # Write the file content to temp workspace
+                file_full_path = os.path.join(temp_workspace, file_path)
+                os.makedirs(os.path.dirname(file_full_path), exist_ok=True)
+                with open(file_full_path, 'w', encoding='utf-8') as f:
+                    f.write(code)
+                    
+                workspace_path = temp_workspace
+            else:
+                # For single file projects, still need a workspace
+                temp_workspace = os.path.join(tempfile.gettempdir(), f"test_workspace_{project_id}_{int(time.time())}")
+                os.makedirs(temp_workspace, exist_ok=True)
+                
+                # Write the file to workspace
+                file_full_path = os.path.join(temp_workspace, filename)
+                with open(file_full_path, 'w', encoding='utf-8') as f:
+                    f.write(code)
+                    
+                workspace_path = temp_workspace
             
-            update_workflow_status(workflow_id, "completed", "completed", "Analysis complete", 100)
+            update_workflow_status(workflow_id, "generating", "running", "AI is generating test code", 25)
+            print(f"[RUN] Step 1: Generating test code")
+            try:
+                test_code = generator_agent.generate(code, test_plan, filename=filename)
+            except Exception as e:
+                update_workflow_status(workflow_id, "generating", "failed", f"Failed to generate tests: {str(e)}", 25)
+                return jsonify({"error": str(e), "step": "generator"}), 500
             
-            if isinstance(review_result, dict):
-                review_result.update({
+            update_workflow_status(workflow_id, "executing", "running", "Running tests in workspace", 50)
+            print(f"[RUN] Step 2: Executing tests in workspace")
+            
+            absolute_source_path = os.path.join(workspace_path, file_path if db_project.mode == 'git' else filename)
+            
+            result = executor_agent.execute(test_code, workspace_path=workspace_path, source_file_path=absolute_source_path)
+            if isinstance(result, tuple):
+                update_workflow_status(workflow_id, "executing", "failed", f"Test execution failed: {result[0].get('error', 'Unknown error')}", 50)
+                return jsonify(result[0]), result[1]
+            
+            output = result["output"]
+            passed = result["passed"]
+            
+            update_workflow_status(workflow_id, "reviewing", "running", "AI is analyzing test results", 75)
+            print(f"[RUN] Step 3: Reviewing results")
+            
+            if passed:
+                update_workflow_status(workflow_id, "completed", "success", "All tests passed!", 100)
+                update_file_test_status(project_id, file_path, TestStatus.COMPLETED)  # Update file status to completed
+                return jsonify({
+                    "status": "ALL_TESTS_PASS",
                     "file_path": file_path,
                     "test_plan": test_plan,
                     "test_code": test_code,
                     "execution_result": result,
                     "workflow_id": workflow_id
                 })
-                return jsonify(review_result)
-            else:
-                try:
-                    result_dict = json.loads(review_result)
-                    result_dict.update({
-                        "file_path": file_path,
-                        "test_plan": test_plan,
-                        "test_code": test_code,
-                        "execution_result": result,
-                        "workflow_id": workflow_id
-                    })
-                    return jsonify(result_dict)
-                except json.JSONDecodeError:
-                    return jsonify({
-                        "status": "FAILED", 
-                        "issues": [{"test_name": "unknown", "error_type": "ParseError", "description": "Failed to parse analysis", "expected": "", "actual": "", "cause": "Analysis parsing error"}],
-                        "summary": "Failed to parse test analysis",
-                        "fixed_code": "No suggestion provided.",
-                        "file_path": file_path,
-                        "test_plan": test_plan,
-                        "test_code": test_code,
-                        "execution_result": result,
-                        "workflow_id": workflow_id
-                    })
-        except Exception as e:
-            update_workflow_status(workflow_id, "reviewing", "failed", f"Analysis failed: {str(e)}", 75)
-            return jsonify({
-                "error": str(e), 
-                "step": "reviewer",
-                "file_path": file_path,
-                "test_plan": test_plan,
-                "test_code": test_code,
-                "execution_result": result,
-                "workflow_id": workflow_id
-            }), 500
             
+            # Tests failed - update status to failed
+            update_file_test_status(project_id, file_path, TestStatus.FAILED)
+            
+            try:
+                review_result = reviewer_agent.review(output, code=code, test_code=test_code)
+                
+                update_workflow_status(workflow_id, "completed", "completed", "Analysis complete", 100)
+                
+                if isinstance(review_result, dict):
+                    review_result.update({
+                        "file_path": file_path,
+                        "test_plan": test_plan,
+                        "test_code": test_code,
+                        "execution_result": result,
+                        "workflow_id": workflow_id
+                    })
+                    return jsonify(review_result)
+                else:
+                    try:
+                        result_dict = json.loads(review_result)
+                        result_dict.update({
+                            "file_path": file_path,
+                            "test_plan": test_plan,
+                            "test_code": test_code,
+                            "execution_result": result,
+                            "workflow_id": workflow_id
+                        })
+                        return jsonify(result_dict)
+                    except json.JSONDecodeError:
+                        return jsonify({
+                            "status": "FAILED", 
+                            "issues": [{"test_name": "unknown", "error_type": "ParseError", "description": "Failed to parse analysis", "expected": "", "actual": "", "cause": "Analysis parsing error"}],
+                            "summary": "Failed to parse test analysis",
+                            "fixed_code": "No suggestion provided.",
+                            "file_path": file_path,
+                            "test_plan": test_plan,
+                            "test_code": test_code,
+                            "execution_result": result,
+                            "workflow_id": workflow_id
+                        })
+            except Exception as e:
+                update_workflow_status(workflow_id, "reviewing", "failed", f"Analysis failed: {str(e)}", 75)
+                return jsonify({
+                    "error": str(e), 
+                    "step": "reviewer",
+                    "file_path": file_path,
+                    "test_plan": test_plan,
+                    "test_code": test_code,
+                    "execution_result": result,
+                    "workflow_id": workflow_id
+                }), 500
+        
+        finally:
+            # Clean up temporary workspace
+            if temp_workspace and os.path.exists(temp_workspace):
+                time.sleep(0.1)  # Give time for file handles to be released
+                safe_rmtree(temp_workspace)
+                
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:

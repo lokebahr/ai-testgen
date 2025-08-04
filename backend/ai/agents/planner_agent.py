@@ -3,9 +3,14 @@ from openai import OpenAI
 
 PLANNER_PROMPT = (
     "You are an expert in {language} and testing with {framework}.\n"
-    "Suggest a list of tests for the following code, without writing any test code yet.\n"
+    "Suggest a concise list of practical tests for the following code, without writing any test code yet.\n"
+    "Focus on essential functionality rather than exhaustive edge cases:\n"
+    "- Main functionality works correctly\n"
+    "- Basic input validation (empty, null, wrong types)\n"
+    "- Key edge cases that are likely to occur\n"
+    "- Avoid overly specific or brittle test scenarios\n"
     "Return ONLY a JSON array of short test descriptions, e.g.:\n"
-    '["Invalid input test", "Edge cases", "Empty values"]\n'
+    '["Basic functionality", "Invalid input handling", "Key edge cases"]\n'
     "Code:\n\n{code}"
 )
 
