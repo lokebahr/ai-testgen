@@ -10,6 +10,7 @@ import stat
 import time
 from git import Repo
 import uuid
+import subprocess
 
 def safe_rmtree(path):
     """Safely remove directory tree on Windows"""
@@ -256,24 +257,29 @@ def get_project_branches(project_id):
         try:
             temp_dir = os.path.join(tempfile.gettempdir(), f"branches_{project.id}_{uuid.uuid4()}")
             
-            # Use bare clone to avoid checking out files
-            repo = Repo.clone_from(project.git_repo, temp_dir, bare=True)
+            # Use ls-remote to get branches without cloning
+            
+            result = subprocess.run(
+                ['git', 'ls-remote', '--heads', project.git_repo], 
+                capture_output=True, text=True, timeout=30
+            )
+            
+            if result.returncode != 0:
+                return jsonify({"error": f"Failed to fetch branches: {result.stderr}"}), 500
+            
             branches = []
-            for ref in repo.refs:
-                if hasattr(ref, 'remote_name') and ref.remote_name == 'origin':
-                    branch_name = ref.name.replace('origin/', '')
-                    if branch_name != 'HEAD':
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    # Format: "commit_hash refs/heads/branch_name"
+                    parts = line.split('\t')
+                    if len(parts) == 2 and parts[1].startswith('refs/heads/'):
+                        branch_name = parts[1].replace('refs/heads/', '')
                         branches.append(branch_name)
             
-            repo.close()
             return jsonify({"branches": sorted(branches), "current_branch": project.branch}), 200
             
         except Exception as e:
             return jsonify({"error": f"Failed to fetch branches: {str(e)}"}), 500
-        finally:
-            if temp_dir and os.path.exists(temp_dir):
-                time.sleep(0.1)
-                safe_rmtree(temp_dir)
                 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

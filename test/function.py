@@ -13,7 +13,7 @@ def moving_average(nums: List[float], window: int) -> List[float]:
 
     Raises:
         TypeError: if nums is not a list or window is not an int
-        ValueError: if window is not positive or greater than the length of nums
+        ValueError: if window is not positive
     """
     if not isinstance(nums, list):
         raise TypeError("nums must be a list of numbers")
@@ -21,8 +21,8 @@ def moving_average(nums: List[float], window: int) -> List[float]:
         raise TypeError("window must be an integer")
     if window <= 0:
         raise ValueError("window must be positive")
-    if window > len(nums):
-        raise ValueError("window must not be greater than the length of nums")
+    if len(nums) == 0:
+        return []  # Return empty list if nums is empty, regardless of window size
 
     averages: List[float] = []
     for i in range(len(nums) - window + 1):
