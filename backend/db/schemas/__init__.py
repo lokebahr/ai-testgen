@@ -23,6 +23,7 @@ class FileSchema(Schema):
     path = fields.Str(required=True, validate=lambda x: len(x.strip()) > 0)
     title = fields.Str(required=True, validate=lambda x: len(x.strip()) > 0)
     file_content = fields.Str(allow_none=True)
+    content_hash = fields.Str(dump_only=True)
     test_status = EnumField(TestStatus, by_value=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)

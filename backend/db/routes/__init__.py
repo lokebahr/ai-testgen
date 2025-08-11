@@ -8,6 +8,8 @@ import tempfile
 import shutil
 import stat
 import time
+import hashlib
+from datetime import datetime
 from git import Repo
 import uuid
 import subprocess
@@ -79,11 +81,13 @@ def create_project():
         # Handle project initialization based on mode
         if data['mode'] == 'single':
             # Create a single file
+            file_content = data.get('file_content', '')
             file = File(
                 project_id=project.id,
                 path=data.get('filename', 'main.py'),
                 title=data.get('filename', 'main.py'),
-                file_content=data.get('file_content', ''),
+                file_content=file_content,
+                content_hash=hashlib.sha256(file_content.encode('utf-8')).hexdigest() if file_content else None,
                 test_status=TestStatus.UNTESTED
             )
             db.session.add(file)
@@ -122,6 +126,7 @@ def create_project():
                                     path=relative_path,
                                     title=filename,
                                     file_content=content,
+                                    content_hash=hashlib.sha256(content.encode('utf-8')).hexdigest(),
                                     test_status=TestStatus.UNTESTED
                                 )
                                 db.session.add(file)
@@ -206,7 +211,7 @@ def update_file(project_id, file_id):
         if 'test_status' in data:
             file.test_status = data['test_status']
         if 'file_content' in data:
-            file.file_content = data['file_content']
+            file.update_content(data['file_content'])
         
         db.session.commit()
         
@@ -330,6 +335,7 @@ def switch_branch(project_id):
                                 path=relative_path,
                                 title=filename,
                                 file_content=content,
+                                content_hash=hashlib.sha256(content.encode('utf-8')).hexdigest(),
                                 test_status=TestStatus.UNTESTED
                             )
                             db.session.add(file)
@@ -356,7 +362,7 @@ def switch_branch(project_id):
 
 @db_routes.route('/projects/<project_id>/sync', methods=['POST'])
 def sync_project(project_id):
-    """Sync project files with the latest version from git"""
+    """Sync project files with the latest version from git, preserving test results for unchanged files"""
     try:
         project = Project.query.get_or_404(project_id)
         
@@ -366,8 +372,8 @@ def sync_project(project_id):
         if not project.git_repo:
             return jsonify({"error": "Project has no git repository"}), 400
         
-        # Clear existing files and re-scan
-        File.query.filter_by(project_id=project.id).delete()
+        # Get current files in the database
+        existing_files = {file.path: file for file in File.query.filter_by(project_id=project.id).all()}
         
         # Clone and scan files from current branch
         temp_dir = None
@@ -381,8 +387,14 @@ def sync_project(project_id):
             
             repo.close()
             
-            # Scan for files
-            file_count = 0
+            # Track statistics
+            files_added = 0
+            files_updated = 0
+            files_removed = 0
+            files_unchanged = 0
+            
+            # Scan for files in the repository
+            scanned_files = set()
             for root, dirs, files in os.walk(temp_dir):
                 dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules']]
                 
@@ -390,22 +402,50 @@ def sync_project(project_id):
                     if filename.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c')):
                         file_path = os.path.join(root, filename)
                         relative_path = os.path.relpath(file_path, temp_dir).replace('\\', '/')
+                        scanned_files.add(relative_path)
                         
                         try:
                             with open(file_path, 'r', encoding='utf-8') as f:
-                                content = f.read()
+                                new_content = f.read()
                             
-                            file = File(
-                                project_id=project.id,
-                                path=relative_path,
-                                title=filename,
-                                file_content=content,
-                                test_status=TestStatus.UNTESTED
-                            )
-                            db.session.add(file)
-                            file_count += 1
+                            new_content_hash = hashlib.sha256(new_content.encode('utf-8')).hexdigest()
+                            
+                            # Check if file exists and if content has changed
+                            if relative_path in existing_files:
+                                existing_file = existing_files[relative_path]
+                                
+                                if existing_file.content_hash != new_content_hash:
+                                    # File content has changed - update it and reset test status
+                                    existing_file.file_content = new_content
+                                    existing_file.content_hash = new_content_hash
+                                    existing_file.title = filename
+                                    existing_file.test_status = TestStatus.UNTESTED
+                                    existing_file.updated_at = datetime.utcnow()
+                                    files_updated += 1
+                                else:
+                                    # File content unchanged - preserve test status
+                                    files_unchanged += 1
+                            else:
+                                # New file - add it
+                                file = File(
+                                    project_id=project.id,
+                                    path=relative_path,
+                                    title=filename,
+                                    file_content=new_content,
+                                    content_hash=new_content_hash,
+                                    test_status=TestStatus.UNTESTED
+                                )
+                                db.session.add(file)
+                                files_added += 1
+                                
                         except (UnicodeDecodeError, IOError):
                             continue
+            
+            # Remove files that no longer exist in the repository
+            for file_path, file_obj in existing_files.items():
+                if file_path not in scanned_files:
+                    db.session.delete(file_obj)
+                    files_removed += 1
             
             db.session.commit()
             
@@ -417,10 +457,17 @@ def sync_project(project_id):
                 time.sleep(0.1)
                 safe_rmtree(temp_dir)
         
-        # Return updated project
+        # Return updated project with sync statistics
         result = project_schema.dump(project)
         return jsonify({
-            "message": f"Project synced successfully. {file_count} files updated.",
+            "message": f"Project synced successfully.",
+            "sync_stats": {
+                "files_added": files_added,
+                "files_updated": files_updated,
+                "files_removed": files_removed,
+                "files_unchanged": files_unchanged,
+                "total_files": files_added + files_updated + files_unchanged
+            },
             "project": result
         }), 200
         

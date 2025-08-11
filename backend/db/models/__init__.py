@@ -2,6 +2,7 @@ from db import db
 from datetime import datetime
 from enum import Enum
 import uuid
+import hashlib
 
 class TestStatus(Enum):
     UNTESTED = "untested"
@@ -42,12 +43,29 @@ class File(db.Model):
     path = db.Column(db.String(500), nullable=False)
     title = db.Column(db.String(255), nullable=False)
     file_content = db.Column(db.Text, nullable=True)
+    content_hash = db.Column(db.String(64), nullable=True)  # SHA-256 hash of file content
     test_status = db.Column(db.Enum(TestStatus), default=TestStatus.UNTESTED, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Unique constraint for path within a project
     __table_args__ = (db.UniqueConstraint('project_id', 'path', name='unique_project_file_path'),)
+    
+    def calculate_content_hash(self):
+        """Calculate SHA-256 hash of file content"""
+        if self.file_content is None:
+            return None
+        return hashlib.sha256(self.file_content.encode('utf-8')).hexdigest()
+    
+    def update_content(self, new_content):
+        """Update file content and recalculate hash"""
+        self.file_content = new_content
+        self.content_hash = self.calculate_content_hash()
+    
+    def content_changed(self, new_content):
+        """Check if the new content is different from current content"""
+        new_hash = hashlib.sha256(new_content.encode('utf-8')).hexdigest() if new_content else None
+        return self.content_hash != new_hash
     
     def to_dict(self):
         return {
@@ -56,6 +74,7 @@ class File(db.Model):
             'path': self.path,
             'title': self.title,
             'file_content': self.file_content,
+            'content_hash': self.content_hash,
             'test_status': self.test_status.value,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
