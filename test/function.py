@@ -21,11 +21,11 @@ def moving_average(nums: List[float], window: int) -> List[float]:
         raise TypeError("window must be an integer")
     if window <= 0:
         raise ValueError("window must be positive")
+    if len(nums) == 0:
+        return []  # Return empty list if nums is empty, regardless of window size
 
     averages: List[float] = []
-    # BUG #1: off-by-one in range: should be `len(nums) - window + 1`
-    # BUG #2: should raise ValueError if window > len(nums), but silently returns []
-    for i in range(len(nums) - window):
+    for i in range(len(nums) - window + 1):
         window_sum = sum(nums[i : i + window])
         averages.append(window_sum / window)
 

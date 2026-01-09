@@ -11,7 +11,7 @@ from .agents.reviewer_agent import ReviewerAgent
 from markdown import markdown as md_to_html
 
 load_dotenv()
-
+#this si the flow for the test proccess
 app = Flask(__name__)
 CORS(app)
 
@@ -20,8 +20,6 @@ planner_agent = PlannerAgent()
 generator_agent = GeneratorAgent()
 executor_agent = ExecutorAgent()
 reviewer_agent = ReviewerAgent()
-
-
 
 @app.route("/plan", methods=["POST"])
 def plan():
@@ -59,13 +57,34 @@ def generate():
     if not code or not tests:
         return jsonify({"error": "Missing code or tests"}), 400
     print(f"[GENERATE] Generating tests for {filename} with plan: {tests}")
-    try:
-        test_code = generator_agent.generate(code, tests, filename=filename)
-        print(f"[GENERATE] Stripped test code:\n{test_code}")
-        return jsonify({"test_code": test_code})
-    except Exception as e:
-        print(f"[GENERATE][ERROR] {e}")
-        return jsonify({"error": str(e), "step": "generator"}), 500
+    
+    max_retries = 2
+    compilation_feedback = None
+    for attempt in range(max_retries + 1):
+        try:
+            if compilation_feedback:
+                test_code = generator_agent.generate(code, tests, filename=filename, 
+                                                   previous_error=compilation_feedback)
+            else:
+                test_code = generator_agent.generate(code, tests, filename=filename)
+            
+            result = executor_agent.execute(test_code)
+            if isinstance(result, tuple):
+                error_data, status_code = result
+                if error_data.get("compilation_error") and attempt < max_retries:
+                    compilation_feedback = error_data.get("error", "Compilation failed")
+                    print(f"[GENERATE] Compilation error on attempt {attempt + 1}: {compilation_feedback}")
+                    continue
+            
+            print(f"[GENERATE] Generated valid test code:\n{test_code}")
+            return jsonify({"test_code": test_code})
+            
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"[GENERATE] Error on attempt {attempt + 1}, retrying: {e}")
+                continue
+            print(f"[GENERATE][ERROR] {e}")
+            return jsonify({"error": str(e), "step": "generator"}), 500
 
 
 @app.route("/execute", methods=["POST"])
@@ -99,11 +118,11 @@ def review():
         review_result = reviewer_agent.review(output, code=code, test_code=test_code, conversation=conversation)
         print(f"[REVIEW] Parsed result: {review_result}")
         
-        # The reviewer agent now returns a dictionary directly
+        # reviewer agent now returns a dictionary directly
         if isinstance(review_result, dict):
             return jsonify(review_result)
         else:
-            # Fallback if it somehow returns a string
+            # fallback if it somehow returns a string
             import json
             try:
                 result = json.loads(review_result)
@@ -126,10 +145,10 @@ def orchestrate():
     language = data.get("language", "python")
     framework = data.get("framework", "pytest")
     filename = data.get("filename", "code.py")
-    # 1. Plan
+    # plan
     try:
         plan_result = planner_agent.plan(code, language=language, framework=framework)
-        # Strip markdown code blocks if present
+        # remove markdown code blocks if present
         if plan_result.startswith("```json"):
             plan_result = plan_result[7:].strip()
         if plan_result.startswith("```"):
@@ -140,18 +159,35 @@ def orchestrate():
         tests = eval(plan_result) if isinstance(plan_result, str) else plan_result
     except Exception as e:
         return jsonify({"error": str(e), "step": "planner"}), 500
-    # 2. Generate
-    try:
-        test_code = generator_agent.generate(code, tests, filename=filename)
-    except Exception as e:
-        return jsonify({"error": str(e), "step": "generator"}), 500
-    # 3. Execute
-    result = executor_agent.execute(test_code)
-    if isinstance(result, tuple):
-        return jsonify(result[0]), result[1]
+    # generate (with retry for compilation errors)
+    max_retries = 2
+    compilation_feedback = None
+    for attempt in range(max_retries + 1):
+        try:
+            if compilation_feedback:
+                test_code = generator_agent.generate(code, tests, filename=filename, 
+                                                   previous_error=compilation_feedback)
+            else:
+                test_code = generator_agent.generate(code, tests, filename=filename)
+        except Exception as e:
+            return jsonify({"error": str(e), "step": "generator"}), 500
+        
+        # run tests (check compilation first)
+        result = executor_agent.execute(test_code)
+        if isinstance(result, tuple):
+            error_data, status_code = result
+            if error_data.get("compilation_error") and attempt < max_retries:
+                compilation_feedback = error_data.get("error", "Compilation failed")
+                print(f"[ORCHESTRATE] Compilation error on attempt {attempt + 1}: {compilation_feedback}")
+                continue
+            return jsonify(error_data), status_code
+        
+        # If we get here, compilation was succesful
+        break
+    
     output = result["output"]
     passed = result["passed"]
-    # 4. Review
+    # Review
     if passed:
         return jsonify({"status": "ALL_TESTS_PASS"})
     try:

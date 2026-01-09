@@ -1,6 +1,11 @@
 flask
 flask-cors
-openai==0.28
-dotenv
+flask-sqlalchemy
+flask-migrate
+marshmallow
+marshmallow-enum
+openai
+python-dotenv
 pytest
 markdown
+GitPython

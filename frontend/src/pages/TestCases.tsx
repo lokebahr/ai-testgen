@@ -27,7 +27,7 @@ export default function TestCases() {
         setLoading(true);
         setReview(null);
         try {
-            const resp = await fetch("http://localhost:5000/review", {
+            const resp = await fetch("http://localhost:5000/legacy/review", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ passed: false, output: pytestOutput }),

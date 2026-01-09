@@ -21,7 +21,7 @@ export default function Home() {
     const handleGenerate = async () => {
         setLoading(true);
         try {
-            const response = await fetch("http://localhost:5000/plan", {
+            const response = await fetch("http://localhost:5000/legacy/plan", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ code, language, framework }),
@@ -70,7 +70,7 @@ export default function Home() {
         setModalOpen(false);
         setLoading(true);
         try {
-            const response = await fetch("http://localhost:5000/generate", {
+            const response = await fetch("http://localhost:5000/legacy/generate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ code, tests: plan, filename }),
